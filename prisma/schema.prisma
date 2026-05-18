@@ -1,0 +1,340 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────
+
+enum ProductType {
+  IMFL
+  BEER
+}
+
+enum ImflCategory {
+  WHISKY
+  RUM
+  GIN
+  VODKA
+  WINE
+  BRANDY
+  OTHERS
+}
+
+enum BeerPackaging {
+  BOTTLE
+  TIN
+}
+
+enum PermitStatus {
+  INDENTED
+  CONFIRMED
+  RECEIVED
+  PARTIAL
+}
+
+enum ExpenseCategory {
+  TEA
+  PERMIT_RENT
+  POOJA
+  BREAKAGE
+  OVER_CASH
+  ELECTRICITY_BILL
+  GOOGLE_PAY
+  BHATTA
+  GOOGLE_PAY_NEGATIVE
+  PAK
+  OTHERS
+}
+
+enum CashCategory {
+  COLLECTION
+  DRAWER_CASH
+  TIPS_CASH
+}
+
+enum DenominationType {
+  NOTE
+  COIN
+}
+
+// ─────────────────────────────────────────────────────────────
+// SHOP MASTER
+// ─────────────────────────────────────────────────────────────
+
+model Shop {
+  id                Int      @id @default(autoincrement())
+  name              String
+  short_name        String   @unique
+  address           String
+  ksbcl_retailer_id String   @unique
+  owner_name        String
+  gst_number        String?
+  license_number    String?
+  is_active         Boolean  @default(true)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  counters     Counter[]
+  permits      Permit[]
+  godown_stock GodownStock[]
+}
+
+// ─────────────────────────────────────────────────────────────
+// PRODUCT MASTER
+// ─────────────────────────────────────────────────────────────
+
+model ProductCategory {
+  id             Int            @id @default(autoincrement())
+  product_type   ProductType
+  imfl_category  ImflCategory?
+  beer_packaging BeerPackaging?
+  display_name   String
+
+  products Product[]
+}
+
+model Product {
+  id               Int     @id @default(autoincrement())
+  master_code      Int     @unique
+  short_name       String
+  // nullable until product is linked to a KSBCL invoice
+  ksbcl_item_name  String?
+  ksbcl_item_code  String?
+  category_id      Int
+  volume_ml        Int
+  carton_size      Int
+  // aroed: authorised surcharge per bottle, included in MRP calculation
+  aroed_per_bottle Decimal  @default(0) @db.Decimal(10, 2)
+  is_active        Boolean  @default(true)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  category               ProductCategory      @relation(fields: [category_id], references: [id])
+  permit_items           PermitItem[]
+  counter_selling_prices CounterSellingPrice[]
+  godown_stock           GodownStock[]
+  daily_counter_stock    DailyCounterStock[]
+}
+
+// ─────────────────────────────────────────────────────────────
+// PERMIT (KSBCL INDENT / INVOICE)
+// ─────────────────────────────────────────────────────────────
+
+model Permit {
+  id                   Int          @id @default(autoincrement())
+  shop_id              Int
+  indent_no            String       @unique
+  invoice_no           String       @unique
+  permit_date          DateTime     @db.Date
+  bank_transfer_ref    String?
+  bank_transfer_date   DateTime?    @db.Date
+  bank_transfer_amount Decimal?     @db.Decimal(12, 2)
+  total_indent_cbs     Int          @default(0)
+  total_indent_amount  Decimal      @default(0) @db.Decimal(12, 2)
+  total_cnf_cbs        Int          @default(0)
+  total_cnf_amount     Decimal      @default(0) @db.Decimal(12, 2)
+  has_rationed_items   Boolean      @default(false)
+  status               PermitStatus @default(INDENTED)
+  received_date        DateTime?    @db.Date
+  notes                String?
+  created_at           DateTime     @default(now())
+  updated_at           DateTime     @updatedAt
+
+  shop  Shop         @relation(fields: [shop_id], references: [id])
+  items PermitItem[]
+}
+
+model PermitItem {
+  id                   Int     @id @default(autoincrement())
+  permit_id            Int
+  product_id           Int
+  rate_per_cb          Decimal @db.Decimal(10, 2)
+  carton_size_snapshot Int
+  indent_cbs           Int     @default(0)
+  indent_btls          Int     @default(0)
+  indent_amount        Decimal @db.Decimal(10, 2)
+  cnf_cbs              Int     @default(0)
+  cnf_btls             Int     @default(0)
+  cnf_amount           Decimal @db.Decimal(10, 2)
+  is_rationed          Boolean @default(false)
+  // stored snapshot so historical MRP is unchanged if product changes later
+  mrp_per_bottle       Decimal @db.Decimal(10, 2)
+  received_btls        Int?
+
+  permit  Permit  @relation(fields: [permit_id], references: [id])
+  product Product @relation(fields: [product_id], references: [id])
+
+  godown_distributions GodownDistribution[]
+}
+
+// ─────────────────────────────────────────────────────────────
+// COUNTERS
+// ─────────────────────────────────────────────────────────────
+
+model Counter {
+  id            Int     @id @default(autoincrement())
+  shop_id       Int
+  name          String
+  display_order Int
+  is_active     Boolean @default(true)
+
+  shop                 Shop                    @relation(fields: [shop_id], references: [id])
+  staff_assignments    CounterStaffAssignment[]
+  selling_prices       CounterSellingPrice[]
+  godown_distributions GodownDistribution[]
+  daily_stock          DailyCounterStock[]
+  daily_summary        DailyCounterSummary[]
+  expenses             DailyExpense[]
+  cash_records         CashRecord[]
+
+  @@unique([shop_id, display_order])
+}
+
+model CounterStaffAssignment {
+  id            Int       @id @default(autoincrement())
+  counter_id    Int
+  staff_name    String
+  assigned_date DateTime  @db.Date
+  relieved_date DateTime? @db.Date
+
+  counter Counter @relation(fields: [counter_id], references: [id])
+}
+
+model CounterSellingPrice {
+  id             Int       @id @default(autoincrement())
+  counter_id     Int
+  product_id     Int
+  selling_price  Decimal   @db.Decimal(10, 2)
+  effective_from DateTime  @db.Date
+  effective_to   DateTime? @db.Date
+
+  counter Counter @relation(fields: [counter_id], references: [id])
+  product Product @relation(fields: [product_id], references: [id])
+
+  @@index([counter_id, product_id, effective_from])
+}
+
+// ─────────────────────────────────────────────────────────────
+// GODOWN
+// ─────────────────────────────────────────────────────────────
+
+model GodownStock {
+  id                   Int      @id @default(autoincrement())
+  shop_id              Int
+  product_id           Int
+  stock_date           DateTime @db.Date
+  opening_balance_btls Int      @default(0)
+  received_btls        Int      @default(0)
+  closing_balance_btls Int      @default(0)
+
+  shop          Shop                 @relation(fields: [shop_id], references: [id])
+  product       Product              @relation(fields: [product_id], references: [id])
+  distributions GodownDistribution[]
+
+  @@unique([shop_id, product_id, stock_date])
+}
+
+model GodownDistribution {
+  id                Int      @id @default(autoincrement())
+  godown_stock_id   Int
+  counter_id        Int
+  permit_item_id    Int?
+  distributed_btls  Int
+  distribution_date DateTime @db.Date
+
+  godown_stock GodownStock @relation(fields: [godown_stock_id], references: [id])
+  counter      Counter     @relation(fields: [counter_id], references: [id])
+  permit_item  PermitItem? @relation(fields: [permit_item_id], references: [id])
+}
+
+// ─────────────────────────────────────────────────────────────
+// DAILY COUNTER SALES
+// ─────────────────────────────────────────────────────────────
+
+model DailyCounterStock {
+  id                        Int      @id @default(autoincrement())
+  counter_id                Int
+  product_id                Int
+  stock_date                DateTime @db.Date
+  opening_balance_btls      Int      @default(0)
+  received_from_godown_btls Int      @default(0)
+  total_btls                Int      @default(0)
+  sold_btls                 Int      @default(0)
+  closing_balance_btls      Int      @default(0)
+  mrp_per_bottle            Decimal  @db.Decimal(10, 2)
+  selling_price_per_bottle  Decimal  @db.Decimal(10, 2)
+  sale_amount_mrp           Decimal  @default(0) @db.Decimal(12, 2)
+  tips_amount               Decimal  @default(0) @db.Decimal(12, 2)
+  total_sale_amount         Decimal  @default(0) @db.Decimal(12, 2)
+
+  counter Counter @relation(fields: [counter_id], references: [id])
+  product Product @relation(fields: [product_id], references: [id])
+
+  @@unique([counter_id, product_id, stock_date])
+}
+
+model DailyCounterSummary {
+  id                  Int      @id @default(autoincrement())
+  counter_id          Int
+  summary_date        DateTime @db.Date
+  staff_name          String?
+  liquor_sale_amount  Decimal  @default(0) @db.Decimal(12, 2)
+  beer_sale_amount    Decimal  @default(0) @db.Decimal(12, 2)
+  total_tips          Decimal  @default(0) @db.Decimal(12, 2)
+  grand_total_by_sale Decimal  @default(0) @db.Decimal(12, 2)
+  google_pay_amount   Decimal  @default(0) @db.Decimal(12, 2)
+  expenses_total      Decimal  @default(0) @db.Decimal(12, 2)
+  collection_total    Decimal  @default(0) @db.Decimal(12, 2)
+  drawer_cash_total   Decimal  @default(0) @db.Decimal(12, 2)
+  tips_cash_total     Decimal  @default(0) @db.Decimal(12, 2)
+  tally_difference    Decimal  @default(0) @db.Decimal(12, 2)
+
+  counter Counter @relation(fields: [counter_id], references: [id])
+
+  @@unique([counter_id, summary_date])
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXPENSES
+// ─────────────────────────────────────────────────────────────
+
+model DailyExpense {
+  id           Int             @id @default(autoincrement())
+  counter_id   Int
+  expense_date DateTime        @db.Date
+  category     ExpenseCategory
+  amount       Decimal         @db.Decimal(10, 2)
+  is_upi       Boolean         @default(false)
+  upi_ref      String?
+  notes        String?
+
+  counter Counter @relation(fields: [counter_id], references: [id])
+
+  @@index([counter_id, expense_date])
+}
+
+// ─────────────────────────────────────────────────────────────
+// CASH DENOMINATION RECORDS
+// ─────────────────────────────────────────────────────────────
+
+model CashRecord {
+  id                 Int              @id @default(autoincrement())
+  counter_id         Int
+  record_date        DateTime         @db.Date
+  cash_category      CashCategory
+  denomination_type  DenominationType
+  denomination_value Int
+  count              Int
+  total_amount       Int
+
+  counter Counter @relation(fields: [counter_id], references: [id])
+
+  @@unique([counter_id, record_date, cash_category, denomination_type, denomination_value])
+  @@index([counter_id, record_date])
+}
