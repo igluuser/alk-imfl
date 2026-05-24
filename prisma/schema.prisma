@@ -80,9 +80,10 @@ model Shop {
   created_at        DateTime @default(now())
   updated_at        DateTime @updatedAt
 
-  counters     Counter[]
-  permits      Permit[]
-  godown_stock GodownStock[]
+  counters          Counter[]
+  permits           Permit[]
+  godown_stock      GodownStock[]
+  daily_sale_bills  DailySalesBill[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -120,6 +121,7 @@ model Product {
   counter_selling_prices CounterSellingPrice[]
   godown_stock           GodownStock[]
   daily_counter_stock    DailyCounterStock[]
+  bill_items             DailySalesBillItem[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -317,6 +319,44 @@ model DailyExpense {
   counter Counter @relation(fields: [counter_id], references: [id])
 
   @@index([counter_id, expense_date])
+}
+
+// ─────────────────────────────────────────────────────────────
+// DAILY SALES BILLS (KSBCL mandatory billing)
+// ─────────────────────────────────────────────────────────────
+// Liquor limit: 4320 ml per bill | Beer limit: 3900 ml per bill
+
+model DailySalesBill {
+  id           Int         @id @default(autoincrement())
+  shop_id      Int
+  bill_date    DateTime    @db.Date
+  bill_year    Int
+  bill_type    ProductType
+  sequence_no  Int
+  bill_number  String      @unique
+  total_ml     Int
+  total_amount Decimal     @db.Decimal(12, 2)
+  created_at   DateTime    @default(now())
+
+  shop  Shop               @relation(fields: [shop_id], references: [id])
+  items DailySalesBillItem[]
+
+  @@unique([shop_id, bill_year, bill_type, sequence_no])
+  @@index([shop_id, bill_date])
+}
+
+model DailySalesBillItem {
+  id             Int     @id @default(autoincrement())
+  bill_id        Int
+  product_id     Int
+  bottles        Int
+  ml_per_bottle  Int
+  total_ml       Int
+  mrp_per_bottle Decimal @db.Decimal(10, 2)
+  total_amount   Decimal @db.Decimal(12, 2)
+
+  bill    DailySalesBill @relation(fields: [bill_id], references: [id])
+  product Product        @relation(fields: [product_id], references: [id])
 }
 
 // ─────────────────────────────────────────────────────────────
