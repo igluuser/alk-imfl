@@ -30,6 +30,14 @@ CONN = dict(host="195.201.119.186", port=5432,
 IMFL_LIMIT_ML = 4320
 BEER_LIMIT_ML = 3900
 
+EXPENSE_LABEL = {
+    "TEA": "Tea", "PERMIT_RENT": "Permit Rent", "POOJA": "Pooja",
+    "BREAKAGE": "Breakage", "OVER_CASH": "Over Cash",
+    "ELECTRICITY_BILL": "Electricity Bill", "GOOGLE_PAY": "Google Pay",
+    "BHATTA": "Bhatta", "GOOGLE_PAY_NEGATIVE": "Google Pay (Negative)",
+    "PAK": "PAK", "OTHERS": "Others",
+}
+
 
 # ── Billing algorithm ─────────────────────────────────────────
 
@@ -176,6 +184,66 @@ def save_bills(cur, bills, shop_id, bill_date, bill_year, bill_type):
         """, rows)
 
 
+# ── Expenses / Cash / Summary fetchers ───────────────────────
+
+def fetch_counter_summaries(cur, shop_id, sale_date):
+    cur.execute("""
+        SELECT c.id, c.name, c.display_order,
+               dcs.staff_name,
+               dcs.liquor_sale_amount, dcs.beer_sale_amount,
+               dcs.total_tips, dcs.grand_total_by_sale,
+               dcs.google_pay_amount, dcs.expenses_total,
+               dcs.collection_total, dcs.drawer_cash_total,
+               dcs.tips_cash_total, dcs.tally_difference
+        FROM "Counter" c
+        JOIN "DailyCounterSummary" dcs
+             ON dcs.counter_id = c.id AND dcs.summary_date = %s
+        WHERE c.shop_id = %s
+        ORDER BY c.display_order
+    """, (sale_date, shop_id))
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def fetch_expenses(cur, shop_id, sale_date):
+    """Returns {counter_id: [expense_dict, ...]}"""
+    cur.execute("""
+        SELECT c.id, de.category, de.amount, de.is_upi, de.upi_ref
+        FROM "Counter" c
+        JOIN "DailyExpense" de
+             ON de.counter_id = c.id AND de.expense_date = %s
+        WHERE c.shop_id = %s
+        ORDER BY c.display_order, de.category
+    """, (sale_date, shop_id))
+    result = {}
+    for cid, cat, amt, is_upi, ref in cur.fetchall():
+        result.setdefault(cid, []).append(
+            {"category": cat, "amount": amt, "is_upi": is_upi, "upi_ref": ref}
+        )
+    return result
+
+
+def fetch_cash(cur, shop_id, sale_date):
+    """Returns {counter_id: [cash_dict, ...]}"""
+    cur.execute("""
+        SELECT c.id, cr.cash_category, cr.denomination_type,
+               cr.denomination_value, cr.count, cr.total_amount
+        FROM "Counter" c
+        JOIN "CashRecord" cr
+             ON cr.counter_id = c.id AND cr.record_date = %s
+        WHERE c.shop_id = %s
+        ORDER BY c.display_order, cr.cash_category,
+                 cr.denomination_type DESC, cr.denomination_value DESC
+    """, (sale_date, shop_id))
+    result = {}
+    for cid, cat, dtype, dval, cnt, total in cur.fetchall():
+        result.setdefault(cid, []).append(
+            {"cash_category": cat, "denomination_type": dtype,
+             "denomination_value": dval, "count": cnt, "total_amount": total}
+        )
+    return result
+
+
 # ── Report printer ────────────────────────────────────────────
 
 class _Tee:
@@ -252,6 +320,139 @@ def print_report(bills_imfl, bills_beer, shop_name, bill_date, out=None):
     p(dline)
 
 
+# ── Expenses / Cash / UPI section ────────────────────────────
+
+def print_cash_section(p, cash_rows, category_key, label):
+    rows = [r for r in cash_rows if r["cash_category"] == category_key]
+    if not rows:
+        return
+    p(f"\n    Cash — {label}:")
+    total = Decimal("0")
+    for r in rows:
+        dval  = r["denomination_value"]
+        cnt   = r["count"]
+        tamt  = Decimal(str(r["total_amount"]))
+        dtype = r["denomination_type"]
+        if dtype == "NOTE":
+            p(f"      ₹{dval:>4} × {cnt:>5}  =  ₹{tamt:>9,.2f}")
+        else:
+            p(f"      Coins (₹{dval}) × {cnt:>5}  =  ₹{tamt:>9,.2f}")
+        total += tamt
+    p(f"      {'─'*38}")
+    p(f"      {'Total':<30}  ₹{total:>9,.2f}")
+
+
+def print_expenses_cash_report(summaries, expenses, cash, shop_name,
+                               bill_date, out=None):
+    W = 88
+    line  = "─" * W
+    dline = "═" * W
+
+    def p(*args, **kwargs):
+        kwargs.setdefault("file", out)
+        print(*args, **kwargs)
+
+    p(f"\n{dline}")
+    p(f"  EXPENSES · CASH · UPI  ·  {shop_name}  ·  {bill_date}")
+    p(dline)
+
+    shop_totals = {
+        "liquor": Decimal("0"), "beer": Decimal("0"), "tips": Decimal("0"),
+        "grand": Decimal("0"), "upi": Decimal("0"), "expenses": Decimal("0"),
+        "collection": Decimal("0"), "drawer": Decimal("0"), "tips_cash": Decimal("0"),
+        "tally": Decimal("0"),
+    }
+
+    for s in summaries:
+        cid   = s["id"]
+        cname = s["name"]
+        staff = s["staff_name"] or "—"
+        exps  = expenses.get(cid, [])
+        cash_rows = cash.get(cid, [])
+
+        p(f"\n  ■ {cname}  —  {staff}")
+        p(f"  {line}")
+
+        # ── Expenses (non-UPI) ────────────────────────────────
+        non_upi = [e for e in exps if not e["is_upi"]]
+        if non_upi:
+            p(f"\n    Expenses:")
+            exp_total = Decimal("0")
+            for e in non_upi:
+                label = EXPENSE_LABEL.get(e["category"], e["category"])
+                p(f"      {label:<30}  ₹{e['amount']:>9,.2f}")
+                exp_total += Decimal(str(e["amount"]))
+            p(f"      {'─'*38}")
+            p(f"      {'Total Expenses':<30}  ₹{exp_total:>9,.2f}")
+
+        # ── UPI / Google Pay ──────────────────────────────────
+        upi_rows = [e for e in exps if e["is_upi"]]
+        if upi_rows:
+            p(f"\n    UPI / Google Pay:")
+            upi_total = Decimal("0")
+            for e in upi_rows:
+                label = EXPENSE_LABEL.get(e["category"], e["category"])
+                ref   = f"  [{e['upi_ref']}]" if e["upi_ref"] else ""
+                p(f"      {label:<30}  ₹{e['amount']:>9,.2f}{ref}")
+                upi_total += Decimal(str(e["amount"]))
+            p(f"      {'─'*38}")
+            p(f"      {'Total UPI':<30}  ₹{upi_total:>9,.2f}")
+
+        # ── Cash denominations ────────────────────────────────
+        for cat_key, cat_label in [
+            ("COLLECTION",  "Collection"),
+            ("DRAWER_CASH", "Drawer Cash"),
+            ("TIPS_CASH",   "Tips Cash"),
+        ]:
+            print_cash_section(p, cash_rows, cat_key, cat_label)
+
+        # ── Counter summary ───────────────────────────────────
+        p(f"\n    Summary:")
+        p(f"      {'Liquor Sale':<30}  ₹{s['liquor_sale_amount']:>9,.2f}")
+        p(f"      {'Beer Sale':<30}  ₹{s['beer_sale_amount']:>9,.2f}")
+        p(f"      {'Tips':<30}  ₹{s['total_tips']:>9,.2f}")
+        p(f"      {'Grand Total (by sale)':<30}  ₹{s['grand_total_by_sale']:>9,.2f}")
+        p(f"      {'─'*38}")
+        p(f"      {'Google Pay (UPI)':<30}  ₹{s['google_pay_amount']:>9,.2f}")
+        p(f"      {'Expenses Total':<30}  ₹{s['expenses_total']:>9,.2f}")
+        p(f"      {'Collection':<30}  ₹{s['collection_total']:>9,.2f}")
+        p(f"      {'Drawer Cash':<30}  ₹{s['drawer_cash_total']:>9,.2f}")
+        p(f"      {'Tips Cash':<30}  ₹{s['tips_cash_total']:>9,.2f}")
+        p(f"      {'─'*38}")
+        tally = Decimal(str(s["tally_difference"]))
+        sign  = "" if tally == 0 else ("+" if tally > 0 else "")
+        p(f"      {'Tally Difference':<30}  {sign}₹{tally:>9,.2f}")
+
+        for k, field in [
+            ("liquor", "liquor_sale_amount"), ("beer", "beer_sale_amount"),
+            ("tips", "total_tips"),           ("grand", "grand_total_by_sale"),
+            ("upi", "google_pay_amount"),     ("expenses", "expenses_total"),
+            ("collection", "collection_total"), ("drawer", "drawer_cash_total"),
+            ("tips_cash", "tips_cash_total"), ("tally", "tally_difference"),
+        ]:
+            shop_totals[k] += Decimal(str(s[field]))
+
+    # ── Shop total ────────────────────────────────────────────
+    p(f"\n  {'─'*W}")
+    p(f"  SHOP TOTAL — all counters")
+    p(f"  {'─'*W}")
+    p(f"    {'Liquor Sale':<30}  ₹{shop_totals['liquor']:>9,.2f}")
+    p(f"    {'Beer Sale':<30}  ₹{shop_totals['beer']:>9,.2f}")
+    p(f"    {'Tips':<30}  ₹{shop_totals['tips']:>9,.2f}")
+    p(f"    {'Grand Total (by sale)':<30}  ₹{shop_totals['grand']:>9,.2f}")
+    p(f"    {'─'*38}")
+    p(f"    {'Google Pay (UPI)':<30}  ₹{shop_totals['upi']:>9,.2f}")
+    p(f"    {'Expenses Total':<30}  ₹{shop_totals['expenses']:>9,.2f}")
+    p(f"    {'Collection':<30}  ₹{shop_totals['collection']:>9,.2f}")
+    p(f"    {'Drawer Cash':<30}  ₹{shop_totals['drawer']:>9,.2f}")
+    p(f"    {'Tips Cash':<30}  ₹{shop_totals['tips_cash']:>9,.2f}")
+    p(f"    {'─'*38}")
+    t = shop_totals['tally']
+    sign = "" if t == 0 else ("+" if t > 0 else "")
+    p(f"    {'Tally Difference':<30}  {sign}₹{t:>9,.2f}")
+    p(f"\n{dline}\n")
+
+
 # ── Main ──────────────────────────────────────────────────────
 
 def main():
@@ -282,8 +483,12 @@ def main():
         return
     shop_id, shop_name, shop_short = row
 
-    # Fetch sales
-    products = fetch_sales(cur, shop_id, sale_date)
+    # Fetch all data
+    products   = fetch_sales(cur, shop_id, sale_date)
+    summaries  = fetch_counter_summaries(cur, shop_id, sale_date)
+    expenses   = fetch_expenses(cur, shop_id, sale_date)
+    cash       = fetch_cash(cur, shop_id, sale_date)
+
     if not products:
         print(f"No sales found for {shop_short} on {sale_date}.")
         return
@@ -319,6 +524,8 @@ def main():
     with open(report_path, "w", encoding="utf-8") as f:
         out = _Tee(sys.stdout, f)
         print_report(bills_imfl, bills_beer, shop_name, sale_date, out=out)
+        print_expenses_cash_report(summaries, expenses, cash,
+                                   shop_name, sale_date, out=out)
     print(f"  Report saved to {report_path}")
 
     cur.close()
