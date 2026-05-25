@@ -13,9 +13,14 @@ Usage:
 """
 
 import argparse
+import io
+import os
+import sys
 import psycopg2
 from decimal import Decimal
 from datetime import date as date_type
+
+REPORTS_DIR = os.path.join(os.path.dirname(__file__), "..", "Reports")
 
 # ── Config ────────────────────────────────────────────────────
 
@@ -173,53 +178,69 @@ def save_bills(cur, bills, shop_id, bill_date, bill_year, bill_type):
 
 # ── Report printer ────────────────────────────────────────────
 
-def print_report(bills_imfl, bills_beer, shop_name, bill_date):
+class _Tee:
+    """Write to multiple streams at once."""
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+
+def print_report(bills_imfl, bills_beer, shop_name, bill_date, out=None):
     W = 88
     line  = "─" * W
     dline = "═" * W
 
-    print(dline)
-    print(f"  DAILY SALES BILL REPORT  ·  {shop_name}  ·  {bill_date}")
-    print(dline)
+    def p(*args, **kwargs):
+        kwargs.setdefault("file", out)
+        print(*args, **kwargs)
+
+    p(dline)
+    p(f"  DAILY SALES BILL REPORT  ·  {shop_name}  ·  {bill_date}")
+    p(dline)
 
     def print_type_section(bills, label, limit):
         if not bills:
-            print(f"\n  No {label} sales today.\n")
+            p(f"\n  No {label} sales today.\n")
             return
 
-        print(f"\n  ■ {label.upper()} BILLS   (limit: {limit:,} ml per bill)")
-        print(f"  {line}")
+        p(f"\n  ■ {label.upper()} BILLS   (limit: {limit:,} ml per bill)")
+        p(f"  {line}")
 
         grand_ml  = 0
         grand_amt = Decimal("0")
 
         for b in bills:
-            print(f"\n  Bill: {b['bill_number']:<28}  "
-                  f"Total: {b['total_ml']:>6,} ml  |  "
-                  f"₹{b['total_amount']:>10,.2f}")
-            print(f"  {'Brand':<35} {'ml':>5}  {'Btls':>5}  {'Tot.ml':>7}  "
-                  f"{'MRP/btl':>9}  {'Amount':>10}")
-            print(f"  {'─'*35}  {'─'*5}  {'─'*5}  {'─'*7}  {'─'*9}  {'─'*10}")
+            p(f"\n  Bill: {b['bill_number']:<28}  "
+              f"Total: {b['total_ml']:>6,} ml  |  "
+              f"₹{b['total_amount']:>10,.2f}")
+            p(f"  {'Brand':<35} {'ml':>5}  {'Btls':>5}  {'Tot.ml':>7}  "
+              f"{'MRP/btl':>9}  {'Amount':>10}")
+            p(f"  {'─'*35}  {'─'*5}  {'─'*5}  {'─'*7}  {'─'*9}  {'─'*10}")
 
             for it in b["items"]:
-                print(f"  {it['short_name']:<35} "
-                      f"{it['ml_per_bottle']:>5}  "
-                      f"{it['bottles']:>5}  "
-                      f"{it['total_ml']:>7,}  "
-                      f"₹{it['mrp_per_bottle']:>8.2f}  "
-                      f"₹{it['total_amount']:>9.2f}")
+                p(f"  {it['short_name']:<35} "
+                  f"{it['ml_per_bottle']:>5}  "
+                  f"{it['bottles']:>5}  "
+                  f"{it['total_ml']:>7,}  "
+                  f"₹{it['mrp_per_bottle']:>8.2f}  "
+                  f"₹{it['total_amount']:>9.2f}")
 
-            print(f"  {'─'*35}  {'─'*5}  {'─'*5}  {'─'*7}  {'─'*9}  {'─'*10}")
-            print(f"  {'BILL TOTAL':<35}  {'':5}  {'':5}  "
-                  f"{b['total_ml']:>7,}  {'':9}  "
-                  f"₹{b['total_amount']:>9.2f}")
+            p(f"  {'─'*35}  {'─'*5}  {'─'*5}  {'─'*7}  {'─'*9}  {'─'*10}")
+            p(f"  {'BILL TOTAL':<35}  {'':5}  {'':5}  "
+              f"{b['total_ml']:>7,}  {'':9}  "
+              f"₹{b['total_amount']:>9.2f}")
 
             grand_ml  += b["total_ml"]
             grand_amt += b["total_amount"]
 
-        print(f"\n  {label} subtotal: {len(bills)} bill(s)  |  "
-              f"{grand_ml:,} ml total  |  ₹{grand_amt:,.2f}")
-        print(f"  {line}")
+        p(f"\n  {label} subtotal: {len(bills)} bill(s)  |  "
+          f"{grand_ml:,} ml total  |  ₹{grand_amt:,.2f}")
+        p(f"  {line}")
 
     print_type_section(bills_imfl, "Liquor (IMFL)", IMFL_LIMIT_ML)
     print_type_section(bills_beer, "Beer",          BEER_LIMIT_ML)
@@ -227,8 +248,8 @@ def print_report(bills_imfl, bills_beer, shop_name, bill_date):
     total_bills = len(bills_imfl) + len(bills_beer)
     total_amt   = (sum(b["total_amount"] for b in bills_imfl) +
                    sum(b["total_amount"] for b in bills_beer))
-    print(f"\n  TOTAL — {total_bills} bill(s)  |  ₹{total_amt:,.2f}\n")
-    print(dline)
+    p(f"\n  TOTAL — {total_bills} bill(s)  |  ₹{total_amt:,.2f}\n")
+    p(dline)
 
 
 # ── Main ──────────────────────────────────────────────────────
@@ -241,6 +262,8 @@ def main():
                     help="Shop short_name (default: KLS)")
     ap.add_argument("--no-save", action="store_true",
                     help="Print report only — do not write to DB")
+    ap.add_argument("--output", metavar="FILE",
+                    help="Save report to this path (default: Reports/{shop}-{date}-bills.txt)")
     args = ap.parse_args()
 
     sale_date = date_type.fromisoformat(args.date)
@@ -289,7 +312,14 @@ def main():
         print(f"  Saved {len(bills_imfl)} liquor bill(s) and "
               f"{len(bills_beer)} beer bill(s) to DB.")
 
-    print_report(bills_imfl, bills_beer, shop_name, sale_date)
+    report_path = args.output or os.path.join(
+        REPORTS_DIR, f"{shop_short}-{sale_date}-bills.txt"
+    )
+    os.makedirs(os.path.dirname(os.path.abspath(report_path)), exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        out = _Tee(sys.stdout, f)
+        print_report(bills_imfl, bills_beer, shop_name, sale_date, out=out)
+    print(f"  Report saved to {report_path}")
 
     cur.close()
     conn.close()
