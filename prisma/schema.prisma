@@ -58,6 +58,11 @@ enum CashCategory {
   TIPS_CASH
 }
 
+enum StockLotSource {
+  OPENING_BALANCE
+  PERMIT
+}
+
 enum DenominationType {
   NOTE
   COIN
@@ -84,6 +89,7 @@ model Shop {
   permits           Permit[]
   godown_stock      GodownStock[]
   daily_sale_bills  DailySalesBill[]
+  stock_lots        StockLot[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -122,6 +128,7 @@ model Product {
   godown_stock           GodownStock[]
   daily_counter_stock    DailyCounterStock[]
   bill_items             DailySalesBillItem[]
+  stock_lots             StockLot[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -173,6 +180,7 @@ model PermitItem {
   product Product @relation(fields: [product_id], references: [id])
 
   godown_distributions GodownDistribution[]
+  stock_lots           StockLot[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -349,14 +357,41 @@ model DailySalesBillItem {
   id             Int     @id @default(autoincrement())
   bill_id        Int
   product_id     Int
+  stock_lot_id   Int?
   bottles        Int
   ml_per_bottle  Int
   total_ml       Int
   mrp_per_bottle Decimal @db.Decimal(10, 2)
   total_amount   Decimal @db.Decimal(12, 2)
 
-  bill    DailySalesBill @relation(fields: [bill_id], references: [id])
-  product Product        @relation(fields: [product_id], references: [id])
+  bill      DailySalesBill @relation(fields: [bill_id], references: [id])
+  product   Product        @relation(fields: [product_id], references: [id])
+  stock_lot StockLot?      @relation(fields: [stock_lot_id], references: [id])
+}
+
+// ─────────────────────────────────────────────────────────────
+// STOCK LOTS (FIFO price layers per shop+product)
+// ─────────────────────────────────────────────────────────────
+// One lot per OB or per permit receipt. Billing consumes oldest
+// lot first; consumed_qty is updated after each day's bills.
+
+model StockLot {
+  id             Int            @id @default(autoincrement())
+  shop_id        Int
+  product_id     Int
+  mrp_per_bottle Decimal        @db.Decimal(10, 2)
+  initial_qty    Int
+  consumed_qty   Int            @default(0)
+  lot_date       DateTime       @db.Date
+  source         StockLotSource
+  permit_item_id Int?
+
+  shop        Shop        @relation(fields: [shop_id], references: [id])
+  product     Product     @relation(fields: [product_id], references: [id])
+  permit_item PermitItem? @relation(fields: [permit_item_id], references: [id])
+  bill_items  DailySalesBillItem[]
+
+  @@index([shop_id, product_id, lot_date])
 }
 
 // ─────────────────────────────────────────────────────────────
