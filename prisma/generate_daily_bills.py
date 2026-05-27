@@ -41,12 +41,83 @@ EXPENSE_LABEL = {
 
 # ── Billing algorithm ─────────────────────────────────────────
 
+def fifo_consume(cur, shop_id, products):
+    """
+    Expand each product's total_sold across StockLots in FIFO order
+    (oldest lot_date first, then by id).  Updates consumed_qty on each
+    lot in the same transaction — caller must commit.
+
+    Returns an expanded list where one product may appear multiple times
+    (one entry per lot consumed).  Each entry carries the lot's MRP and
+    stock_lot_id so billing and DB inserts are correct.
+
+    If a product has no active lots (shouldn't happen after backfill)
+    it is passed through unchanged with stock_lot_id=None as a fallback.
+    """
+    expanded = []
+    for p in products:
+        remaining = p["total_sold"]
+        if remaining <= 0:
+            continue
+
+        cur.execute("""
+            SELECT id, mrp_per_bottle, (initial_qty - consumed_qty) AS rem
+            FROM "StockLot"
+            WHERE shop_id   = %s
+              AND product_id = %s
+              AND consumed_qty < initial_qty
+            ORDER BY lot_date ASC, id ASC
+        """, (shop_id, p["id"]))
+        lots = cur.fetchall()
+
+        if not lots:
+            # No lot — keep as-is (MRP from DailyCounterStock fallback)
+            expanded.append({**p, "stock_lot_id": None})
+            continue
+
+        for lot_id, lot_mrp, lot_rem in lots:
+            if remaining <= 0:
+                break
+            take = min(remaining, int(lot_rem))
+            if take <= 0:
+                continue
+            cur.execute("""
+                UPDATE "StockLot"
+                SET consumed_qty = consumed_qty + %s
+                WHERE id = %s
+            """, (take, lot_id))
+            expanded.append({
+                **p,
+                "total_sold":   take,
+                "mrp":          Decimal(str(lot_mrp)),
+                "stock_lot_id": lot_id,
+            })
+            remaining -= take
+
+        if remaining > 0:
+            # Safety net: lot stock ran out before sales were exhausted.
+            # Use the last lot's MRP as the best available approximation.
+            fallback_mrp = Decimal(str(lots[-1][1]))
+            expanded.append({
+                **p,
+                "total_sold":   remaining,
+                "mrp":          fallback_mrp,
+                "stock_lot_id": None,
+            })
+
+    return expanded
+
+
 def generate_bills(products, limit_ml, type_char, shop_short, year, start_seq):
     """
     Splits products into bills respecting the ML limit.
     Returns (list_of_bills, next_sequence_no).
     Each bill: {sequence_no, bill_number, total_ml, total_amount, items[]}
-    Each item: {product_id, short_name, bottles, ml_per_bottle, total_ml, mrp_per_bottle, total_amount}
+    Each item: {product_id, short_name, bottles, ml_per_bottle, total_ml,
+                mrp_per_bottle, total_amount, stock_lot_id}
+
+    `products` is the FIFO-expanded list from fifo_consume() — one entry
+    per (product × lot), each carrying its own mrp and stock_lot_id.
     """
     bills = []
     cur_items = []
@@ -94,6 +165,7 @@ def generate_bills(products, limit_ml, type_char, shop_short, year, start_seq):
                 "total_ml":      ml_in,
                 "mrp_per_bottle": mrp,
                 "total_amount":  amt_in,
+                "stock_lot_id":  p.get("stock_lot_id"),
             })
             cur_ml     += ml_in
             cur_amount += amt_in
@@ -144,6 +216,23 @@ def next_seq(cur, shop_id, bill_year, bill_type):
 
 
 def delete_day_bills(cur, shop_id, bill_date):
+    # Undo consumed_qty on StockLots so re-running a date is idempotent
+    cur.execute("""
+        SELECT dsbi.stock_lot_id, SUM(dsbi.bottles)
+        FROM "DailySalesBillItem" dsbi
+        JOIN "DailySalesBill"     dsb ON dsb.id = dsbi.bill_id
+        WHERE dsb.shop_id  = %s
+          AND dsb.bill_date = %s
+          AND dsbi.stock_lot_id IS NOT NULL
+        GROUP BY dsbi.stock_lot_id
+    """, (shop_id, bill_date))
+    for lot_id, bottles in cur.fetchall():
+        cur.execute("""
+            UPDATE "StockLot"
+            SET consumed_qty = GREATEST(0, consumed_qty - %s)
+            WHERE id = %s
+        """, (int(bottles), lot_id))
+
     cur.execute("""
         DELETE FROM "DailySalesBillItem"
         WHERE bill_id IN (
@@ -171,14 +260,15 @@ def save_bills(cur, bills, shop_id, bill_date, bill_year, bill_type):
         bill_id = cur.fetchone()[0]
 
         rows = [
-            (bill_id, i["product_id"], i["bottles"], i["ml_per_bottle"],
+            (bill_id, i["product_id"], i.get("stock_lot_id"),
+             i["bottles"], i["ml_per_bottle"],
              i["total_ml"], str(i["mrp_per_bottle"]), str(i["total_amount"]))
             for i in b["items"]
         ]
         from psycopg2.extras import execute_values
         execute_values(cur, """
             INSERT INTO "DailySalesBillItem"
-                (bill_id, product_id, bottles, ml_per_bottle,
+                (bill_id, product_id, stock_lot_id, bottles, ml_per_bottle,
                  total_ml, mrp_per_bottle, total_amount)
             VALUES %s
         """, rows)
@@ -493,12 +583,15 @@ def main():
         print(f"No sales found for {shop_short} on {sale_date}.")
         return
 
+    if not args.no_save:
+        # Delete existing bills (also undoes consumed_qty on StockLots)
+        delete_day_bills(cur, shop_id, sale_date)
+
+    # Expand products through FIFO lots — splits by MRP layer
+    products = fifo_consume(cur, shop_id, products)
+
     imfl_products = [p for p in products if p["product_type"] == "IMFL"]
     beer_products = [p for p in products if p["product_type"] == "BEER"]
-
-    if not args.no_save:
-        # Delete existing bills for this day before regenerating
-        delete_day_bills(cur, shop_id, sale_date)
 
     # Determine next sequence numbers (after deletion, sequence should resume
     # from where the year left off for other dates)
