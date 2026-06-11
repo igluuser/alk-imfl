@@ -129,6 +129,7 @@ model Product {
   daily_counter_stock    DailyCounterStock[]
   bill_items             DailySalesBillItem[]
   stock_lots             StockLot[]
+  product_rates          ProductRate[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -367,6 +368,25 @@ model DailySalesBillItem {
   bill      DailySalesBill @relation(fields: [bill_id], references: [id])
   product   Product        @relation(fields: [product_id], references: [id])
   stock_lot StockLot?      @relation(fields: [stock_lot_id], references: [id])
+}
+
+// ─────────────────────────────────────────────────────────────
+// PRODUCT RATES (KSBCL permit rate + aroed per product per date)
+// ─────────────────────────────────────────────────────────────
+// Populated from KSBCL indent PDFs (ad-hoc). Used by seed_permits_and_lots.py
+// to compute StockLot MRP: (rate_per_cb / carton_size + aroed_per_bottle) * 1.10
+
+model ProductRate {
+  id               Int      @id @default(autoincrement())
+  product_id       Int
+  effective_date   DateTime @db.Date
+  rate_per_cb      Decimal  @db.Decimal(10, 2)
+  aroed_per_bottle Decimal  @db.Decimal(10, 4)
+  created_at       DateTime @default(now())
+
+  product Product @relation(fields: [product_id], references: [id])
+
+  @@index([product_id, effective_date])
 }
 
 // ─────────────────────────────────────────────────────────────

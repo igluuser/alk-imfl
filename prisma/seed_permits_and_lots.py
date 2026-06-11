@@ -148,9 +148,27 @@ PERMIT_MRP = {
 
 
 def get_product_map(cur):
-    """Returns {master_code: (product_id, short_name)}."""
-    cur.execute('SELECT master_code, id, short_name FROM "Product"')
-    return {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    """Returns {master_code: (product_id, short_name, carton_size)}."""
+    cur.execute('SELECT master_code, id, short_name, carton_size FROM "Product"')
+    return {r[0]: (r[1], r[2], r[3]) for r in cur.fetchall()}
+
+
+def get_product_rate(cur, product_id, permit_date):
+    """
+    Fetch the most recent ProductRate on or before permit_date.
+    Returns (rate_per_cb, aroed_per_bottle) as Decimal, or None if not found.
+    """
+    cur.execute("""
+        SELECT rate_per_cb, aroed_per_bottle
+        FROM "ProductRate"
+        WHERE product_id = %s AND effective_date <= %s
+        ORDER BY effective_date DESC, id DESC
+        LIMIT 1
+    """, (product_id, permit_date))
+    row = cur.fetchone()
+    if row:
+        return Decimal(str(row[0])), Decimal(str(row[1]))
+    return None
 
 
 def get_old_mrp(cur, product_id, before_date):
@@ -278,15 +296,24 @@ def seed(dry_run=False):
             if mc not in prod_map:
                 print(f"    WARNING: mc={mc} not in Product — skipped")
                 continue
-            pid, name = prod_map[mc]
+            pid, name, carton_size = prod_map[mc]
 
-            mrp_str = mrp_map.get(mc)
-            if mrp_str is None:
-                print(f"    SKIP (no MRP): mc={mc:>4} {name:<30} recv={recv_btls}")
-                continue
+            # ProductRate takes priority; fall back to hardcoded PERMIT_MRP
+            rate_row = get_product_rate(cur, pid, pdate)
+            if rate_row:
+                rate_per_cb, aroed = rate_row
+                mrp = (rate_per_cb / carton_size + aroed) * Decimal("1.10")
+                mrp = mrp.quantize(Decimal("0.01"))
+                src = "ProductRate"
+            else:
+                mrp_str = mrp_map.get(mc)
+                if mrp_str is None:
+                    print(f"    SKIP (no MRP): mc={mc:>4} {name:<30} recv={recv_btls}")
+                    continue
+                mrp = Decimal(mrp_str)
+                src = "hardcoded"
 
-            mrp = Decimal(mrp_str)
-            print(f"    mc={mc:>4} {name:<30} recv={recv_btls:>5}  mrp={mrp}")
+            print(f"    mc={mc:>4} {name:<30} recv={recv_btls:>5}  mrp={mrp}  [{src}]")
 
             if not dry_run:
                 cur.execute("""
