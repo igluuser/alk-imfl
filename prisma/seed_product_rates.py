@@ -112,7 +112,7 @@ def best_match(brand_key, volume_ml, products):
 
 def parse_pdf(path):
     with pdfplumber.open(path) as pdf:
-        text = pdf.pages[0].extract_text()
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
 
     m = re.search(r'Permit\s+Dt\.\s+(\d{2}-\d{2}-\d{4})', text)
     if not m:
