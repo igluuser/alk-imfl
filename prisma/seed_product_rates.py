@@ -92,9 +92,10 @@ def _tokens(text):
 def token_overlap(brand_key, candidate_name):
     qa = _tokens(brand_key)
     cb = _tokens(candidate_name)
-    if not qa:
+    if not qa or not cb:
         return 0.0
-    return len(qa & cb) / len(qa)
+    common = len(qa & cb)
+    return min(common / len(qa), common / len(cb))
 
 
 def best_match(brand_key, volume_ml, products):
